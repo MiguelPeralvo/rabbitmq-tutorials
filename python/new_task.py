@@ -18,7 +18,7 @@ if __name__ == '__main__':
 
     message = ' '.join(sys.argv[1:]) or "Hello World!"
     channel.basic_publish(exchange='',
-                          routing_key='task_queue',
+                          routing_key='datalake_10001',
                           body=message,
                           properties=pika.BasicProperties(
                              delivery_mode=2, # make message persistent
