@@ -34,8 +34,9 @@ def consume(ev, queue):
 
     channel.close()
 
+
 if __name__ == '__main__':
-    queues = ['datalake_10001', 'datalake_10090']
+    queues = ['queue_1', 'queue_2']
     workers = 10
 
     for i in range(0, workers):

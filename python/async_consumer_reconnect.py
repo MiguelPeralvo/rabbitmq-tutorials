@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 import logging
+import multiprocessing
+import os
+import time
 
 import pika
 from pika.exceptions import AMQPConnectionError
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, before_log
 
 
 LOG_FORMAT = ('%(levelname) -10s %(asctime)s %(name) -30s %(funcName) '
@@ -11,7 +13,7 @@ LOG_FORMAT = ('%(levelname) -10s %(asctime)s %(name) -30s %(funcName) '
 LOGGER = logging.getLogger(__name__)
 
 
-class ExampleConsumer(object):
+class AsyncConsumer(object):
     """This is an example consumer that will handle unexpected interactions
     with RabbitMQ such as channel and connection closures.
 
@@ -29,22 +31,23 @@ class ExampleConsumer(object):
     QUEUE = 'text'
     ROUTING_KEY = 'example.text'
 
-    def __init__(self, amqp_url):
+    def __init__(self, queue=QUEUE, routing_key=ROUTING_KEY, connection_timeout=None, connection_timeout_callback=None):
         """Create a new instance of the consumer class, passing in the AMQP
         URL used to connect to RabbitMQ.
 
-        :param str amqp_url: The AMQP url to connect with
+        :param str queue: The queue to connect with
+        :param int connection_timeout: timeout for reconnection
 
         """
         self._connection = None
+        self._connection_timeout = connection_timeout
+        self._connection_timeout_callback = connection_timeout_callback
         self._channel = None
         self._closing = False
         self._consumer_tag = None
-        self._url = amqp_url
+        self._queue = queue
+        self._routing_key = routing_key
 
-    @retry(retry=retry_if_exception_type((IOError, TimeoutError, AMQPConnectionError)),
-           stop=stop_after_attempt(3), before=before_log(LOGGER, logging.INFO), reraise=True,
-           wait=wait_exponential(multiplier=1, min=3, max=10))
     def connect(self):
         """This method connects to RabbitMQ, returning the connection handle.
         When the connection is established, the on_connection_open method
@@ -53,13 +56,21 @@ class ExampleConsumer(object):
         :rtype: pika.SelectConnection
 
         """
-        LOGGER.info('Connecting to %s', self._url)
+        LOGGER.info('Connecting to %s', 'rabbitmq')
 
-        return pika.SelectConnection(pika.URLParameters('{}?{}&{}'.format(
-            self._url, 'connection_attempts=3', 'retry_delay=5')),
+        return pika.SelectConnection(
+            pika.ConnectionParameters(
+                host='rabbitmq', port=os.getenv('RABBITMQ_PORT', 5672),
+                virtual_host=os.getenv('RABBITMQ_VHOST', '/'),
+                credentials=pika.credentials.PlainCredentials(
+                    username='rabbit',
+                    password='rabbit'
+                ), connection_attempts=3,  retry_delay=10),
             self.on_connection_open,
             stop_ioloop_on_close=False
         )
+
+    LOGGER.info('Connected to %s', 'rabbitmq')
 
     def on_connection_open(self, unused_connection):
         """This method is called by pika once the connection to RabbitMQ has
@@ -111,7 +122,7 @@ class ExampleConsumer(object):
 
             # Create a new connection
             self._connection = self.connect()
-
+            self.register_callback_loop()
             # There is now a new connection, needs a new ioloop to run
             self._connection.ioloop.start()
 
@@ -183,7 +194,7 @@ class ExampleConsumer(object):
 
         """
         LOGGER.info('Exchange declared')
-        self.setup_queue(self.QUEUE)
+        self.setup_queue(self._queue)
 
     def setup_queue(self, queue_name):
         """Setup the queue on RabbitMQ by invoking the Queue.Declare RPC
@@ -207,9 +218,9 @@ class ExampleConsumer(object):
 
         """
         LOGGER.info('Binding %s to %s with %s',
-                    self.EXCHANGE, self.QUEUE, self.ROUTING_KEY)
-        self._channel.queue_bind(self.on_bindok, self.QUEUE,
-                                 self.EXCHANGE, self.ROUTING_KEY)
+                    self.EXCHANGE, self._queue, self._routing_key)
+        self._channel.queue_bind(self.on_bindok, self._queue,
+                                 self.EXCHANGE, self._routing_key)
 
     def on_bindok(self, unused_frame):
         """Invoked by pika when the Queue.Bind method has completed. At this
@@ -235,7 +246,7 @@ class ExampleConsumer(object):
         LOGGER.info('Issuing consumer related RPC commands')
         self.add_on_cancel_callback()
         self._consumer_tag = self._channel.basic_consume(self.on_message,
-                                                         self.QUEUE)
+                                                         self._queue)
 
     def add_on_cancel_callback(self):
         """Add a callback that will be invoked if RabbitMQ cancels the consumer
@@ -315,12 +326,23 @@ class ExampleConsumer(object):
         LOGGER.info('Closing the channel')
         self._channel.close()
 
+    def register_callback_loop(self):
+        """Registers itself for the next time and invokes the callback
+        :return:
+        """
+
+        if self._connection_timeout and self._connection_timeout_callback:
+            self._connection.ioloop.add_timeout(self._connection_timeout, self.register_callback_loop)
+            print('Invoking self._connection_timeout_callback {}'.format(self._connection_timeout_callback))
+            self._connection_timeout_callback()
+
     def run(self):
         """Run the example consumer by connecting to RabbitMQ and then
         starting the IOLoop to block and allow the SelectConnection to operate.
 
         """
         self._connection = self.connect()
+        self.register_callback_loop()
         self._connection.ioloop.start()
 
     def stop(self):
@@ -346,14 +368,36 @@ class ExampleConsumer(object):
         self._connection.close()
 
 
-def main():
+def async_consume(queue, routing_key, connection_timeout=None, connection_timeout_callback=None):
     logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
-    example = ExampleConsumer('amqp://rabbit:rabbit@rabbitmq:5672/%2F')
+    async_consumer = AsyncConsumer(queue, routing_key, connection_timeout, connection_timeout_callback)
     try:
-        example.run()
+        async_consumer.run()
     except KeyboardInterrupt:
-        example.stop()
+        async_consumer.stop()
 
 
 if __name__ == '__main__':
-    main()
+    def main_callback():
+        print('main_callback invoked for pool: {}'.format(pool))
+
+    queues = ['queue_1', 'queue_2']
+    workers = 10
+    pool = multiprocessing.Pool(processes=workers)
+
+    for i in range(0, workers):
+        queue_name = queues[i % len(queues)]
+        pool.apply_async(async_consume, kwds={
+            'queue': queue_name, 'routing_key': queue_name
+        })
+
+    # Stay alive
+    try:
+        while True:
+            consumer = AsyncConsumer('queue_overflow', 'queue_overflow', 5, main_callback)
+            consumer.run()
+    except KeyboardInterrupt:
+        consumer.stop()
+        LOGGER.info('[*] Exiting...')
+        pool.terminate()
+        pool.join()

@@ -31,8 +31,9 @@ def consume(queue):
     print("[*] Created connection for queue: {}".format(queue))
     channel.start_consuming()
 
+
 if __name__ == '__main__':
-    queues = ['datalake_10001', 'datalake_10090']
+    queues = ['queue_1', 'queue_2']
     workers = 10
     pool = multiprocessing.Pool(processes=workers)
 

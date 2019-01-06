@@ -14,11 +14,11 @@ if __name__ == '__main__':
     ))
     channel = connection.channel()
 
-    channel.queue_declare(queue='datalake_10001', durable=True)
+    channel.queue_declare(queue='queue_1', durable=True)
 
     message = ' '.join(sys.argv[1:]) or "Hello World!"
     channel.basic_publish(exchange='',
-                          routing_key='datalake_10001',
+                          routing_key='queue_1',
                           body=message,
                           properties=pika.BasicProperties(
                              delivery_mode=2, # make message persistent
