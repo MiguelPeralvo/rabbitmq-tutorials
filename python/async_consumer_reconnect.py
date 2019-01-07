@@ -58,7 +58,7 @@ class AsyncConsumer(object):
         """
         LOGGER.info('Connecting to %s', 'rabbitmq')
 
-        return pika.SelectConnection(
+        connection = pika.SelectConnection(
             pika.ConnectionParameters(
                 host='rabbitmq', port=os.getenv('RABBITMQ_PORT', 5672),
                 virtual_host=os.getenv('RABBITMQ_VHOST', '/'),
@@ -70,7 +70,8 @@ class AsyncConsumer(object):
             stop_ioloop_on_close=False
         )
 
-    LOGGER.info('Connected to %s', 'rabbitmq')
+        LOGGER.info('Connected to %s', 'rabbitmq')
+        return connection
 
     def on_connection_open(self, unused_connection):
         """This method is called by pika once the connection to RabbitMQ has
