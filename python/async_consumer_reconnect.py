@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
+import traceback
 import logging
 import multiprocessing
 import os
+import queue as Queue
 import time
+import sys
 
 import pika
 from pika.exceptions import AMQPConnectionError
@@ -31,7 +34,11 @@ class AsyncConsumer(object):
     QUEUE = 'text'
     ROUTING_KEY = 'example.text'
 
-    def __init__(self, queue=QUEUE, routing_key=ROUTING_KEY, connection_timeout=None, connection_timeout_callback=None):
+    def __init__(
+        self, queue=QUEUE, routing_key=ROUTING_KEY, connection_timeout=None,
+        connection_timeout_callback=None, connection_error_callback=None,
+        process_queue=None
+    ):
         """Create a new instance of the consumer class, passing in the AMQP
         URL used to connect to RabbitMQ.
 
@@ -42,11 +49,29 @@ class AsyncConsumer(object):
         self._connection = None
         self._connection_timeout = connection_timeout
         self._connection_timeout_callback = connection_timeout_callback
+        self._connection_error_callback = connection_error_callback
+        self._process_queue = process_queue
         self._channel = None
         self._closing = False
         self._consumer_tag = None
         self._queue = queue
         self._routing_key = routing_key
+
+
+    def on_open_error_callback(self, *args, **keywords):
+        """
+
+        :param args:
+        :param keywords:
+        :return:
+        """
+
+        if self._process_queue:
+            error = 'error_callback invoked for error: {} : {}'.format(args, keywords)
+            self._process_queue.put(error)
+
+        if self._connection_error_callback:
+            self._connection_error_callback(args, keywords)
 
     def connect(self):
         """This method connects to RabbitMQ, returning the connection handle.
@@ -66,7 +91,8 @@ class AsyncConsumer(object):
                     username='rabbit',
                     password='rabbit'
                 ), connection_attempts=3,  retry_delay=10),
-            self.on_connection_open,
+            on_open_callback=self.on_connection_open,
+            on_open_error_callback=self.on_open_error_callback,
             stop_ioloop_on_close=False
         )
 
@@ -206,7 +232,7 @@ class AsyncConsumer(object):
 
         """
         LOGGER.info('Declaring queue %s', queue_name)
-        self._channel.queue_declare(self.on_queue_declareok, queue_name)
+        self._channel.queue_declare(self.on_queue_declareok, queue_name, durable=True)
 
     def on_queue_declareok(self, method_frame):
         """Method invoked by pika when the Queue.Declare RPC call made in
@@ -369,36 +395,74 @@ class AsyncConsumer(object):
         self._connection.close()
 
 
-def async_consume(queue, routing_key, connection_timeout=None, connection_timeout_callback=None):
+def async_consume(queue, routing_key, connection_timeout=None, connection_timeout_callback=None,
+                  connection_error_callback=None, process_queue=None):
     logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
-    async_consumer = AsyncConsumer(queue, routing_key, connection_timeout, connection_timeout_callback)
+    async_consumer = AsyncConsumer(
+        queue, routing_key, connection_timeout, connection_timeout_callback, connection_error_callback,
+        process_queue
+    )
     try:
         async_consumer.run()
-    except KeyboardInterrupt:
+    except:
         async_consumer.stop()
+        LOGGER.error(traceback.format_exc())
+        process_queue.put(traceback.format_exc())
+        return -1
 
 
 if __name__ == '__main__':
+    errors = []
+    m = multiprocessing.Manager()
+    queue = m.Queue()
+
     def main_callback():
         print('main_callback invoked for pool: {}'.format(pool))
 
+    def parent_callback(data):
+        print('parent_callback invoked for data: {}'.format(data))
+
+    def error_callback(*args, **keywords):
+        global errors
+        global queue
+
+        error = 'error_callback invoked for error: {} : {}'.format(args, keywords)
+        print(error)
+        errors.append(error)
+        queue.put(error)
+
     queues = ['queue_1', 'queue_2']
-    workers = 10
+    workers = 2
     pool = multiprocessing.Pool(processes=workers)
 
     for i in range(0, workers):
         queue_name = queues[i % len(queues)]
         pool.apply_async(async_consume, kwds={
-            'queue': queue_name, 'routing_key': queue_name
-        })
+            'queue': queue_name, 'routing_key': queue_name,
+            'connection_error_callback': error_callback,
+            'process_queue': queue
+        }, callback=parent_callback, error_callback=error_callback)
 
     # Stay alive
     try:
+        # pool.close()
+        # pool.join()
         while True:
-            consumer = AsyncConsumer('queue_overflow', 'queue_overflow', 5, main_callback)
-            consumer.run()
+            # consumer = AsyncConsumer('queue_overflow', 'queue_overflow', 5, main_callback)
+            # consumer.run()
+            print(errors)
+            result = None
+            try:
+                result = queue.get(block=True, timeout=5)
+            except Queue.Empty as ex:
+                pass
+
+            if result:
+                print(result)
+
+            # time.sleep(5)
     except KeyboardInterrupt:
-        consumer.stop()
+        # consumer.stop()
         LOGGER.info('[*] Exiting...')
         pool.terminate()
         pool.join()
